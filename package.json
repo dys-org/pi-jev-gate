@@ -1,0 +1,50 @@
+{
+  "name": "@dys-org/pi-jev-gate",
+  "version": "0.1.0",
+  "description": "A fail-closed Jev permission gate for Pi",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "permission-gate",
+    "jev"
+  ],
+  "license": "MIT",
+  "author": "David Soards",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dys-org/pi-jev-gate.git"
+  },
+  "homepage": "https://github.com/dys-org/pi-jev-gate#readme",
+  "bugs": {
+    "url": "https://github.com/dys-org/pi-jev-gate/issues"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.17.1",
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test --experimental-strip-types --test-reporter=spec 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "*",
+    "typescript": "*"
+  }
+}
