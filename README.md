@@ -1,6 +1,6 @@
 # Pi Jev Gate
 
-A small, purpose-built Pi permission extension inspired by [`jomatsu/pi-jev-auto-mode`](https://github.com/jomatsu/pi-jev-auto-mode) 0.4.1 (`06a5604`). It is a narrow rewrite with its own fixed policy, not a maintained fork.
+A small, fail-closed permission extension for Pi. It automatically permits ordinary development work, deterministically blocks catastrophic operations, and sends consequential or unknown tool calls to Jev.
 
 The extension supports direct TypeSafe, OpenRouter Decisions, and Vercel AI Gateway. Provider selection is explicit, direct TypeSafe is the default, and providers never fall back to one another.
 
@@ -65,3 +65,7 @@ All providers share the same policy, questions, reduction, and privacy boundary.
 ZDR request fields are not an audit of provider storage. Direct TypeSafe retention follows the user's account. OpenRouter receives its ZDR routing flag. Vercel receives its ZDR flag and TypeSafe-only routing, but Vercel ZDR requires Pro or Enterprise.
 
 This is a lexical permission gate, not a shell parser or sandbox. Symlinks, wrappers, aliases, script internals, and unusual command syntax can escape its classifications.
+
+## Credits
+
+The original concept and implementation starting point came from [`jomatsu/pi-jev-auto-mode`](https://github.com/jomatsu/pi-jev-auto-mode) 0.4.1 (`06a5604`). Pi Jev Gate is a purpose-built rewrite with its own fixed policy and provider transports, not a maintained fork.
