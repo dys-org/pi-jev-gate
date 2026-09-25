@@ -1,6 +1,6 @@
 {
   "name": "@dys-org/pi-jev-gate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A fail-closed Jev permission gate for Pi",
   "keywords": [
     "pi-package",

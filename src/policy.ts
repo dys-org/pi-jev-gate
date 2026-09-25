@@ -63,7 +63,7 @@ const HARD_COMMANDS: readonly [string, RegExp][] = [
   ],
   [
     "permission-system tampering",
-    /(?=.*\b(?:rm|mv|cp|chmod|chown|sed|perl|python|node)\b)(?=.*(?:\.pi[\\/](?:agent[\\/])?extensions[\\/]|pi-jev-gate))/i,
+    /(?=.*\b(?:rm|mv|cp|chmod|chown|sed|perl|python|node)\b)(?=.*pi-jev-gate)/i,
   ],
 ];
 
@@ -147,7 +147,7 @@ function credentialPath(path: string): boolean {
 
 function permissionPath(path: string): boolean {
   const normalized = normalizePath(path);
-  return normalized.endsWith("/.pi/agent/auth.json") || /\/\.pi\/(?:agent\/)?extensions\//.test(normalized) || /\/pi-jev-gate(?:\.json|-policy\.md)$/.test(normalized);
+  return normalized.endsWith("/.pi/agent/auth.json") || /\/pi-jev-gate(?:\.json|-policy\.md)$/.test(normalized);
 }
 
 function protectedWrite(path: string): string | undefined {

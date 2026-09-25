@@ -15,13 +15,13 @@ pi install npm:@dys-org/pi-jev-gate
 Or install the tagged Git release:
 
 ```sh
-pi install git:github.com/dys-org/pi-jev-gate@v0.1.0
+pi install git:github.com/dys-org/pi-jev-gate@v0.1.1
 ```
 
 Or try it for one run without installing:
 
 ```sh
-pi -e git:github.com/dys-org/pi-jev-gate@v0.1.0
+pi -e git:github.com/dys-org/pi-jev-gate@v0.1.1
 ```
 
 Set the credential for the default direct TypeSafe provider before starting Pi:
@@ -54,7 +54,7 @@ Reads, normal in-project writes, Git inspection, and ordinary project task/build
 
 This intentionally accepts checked-out repository code and configured Git/toolchain helper risk. It does not trust downloaded scripts, package executors/installers, arbitrary commands hidden behind language runners, consequential remote actions, or writes outside the project. Tool paths are normalized consistently with Pi for Unicode spaces, a leading `@`, home-relative paths, and file URLs before scope and protection checks.
 
-A small deterministic layer always denies catastrophic root/disk destruction, protected-branch force pushes with clear targets, unresolved destructive targets, credential access/exfiltration, and permission-gate tampering. Transport/auth/timeouts, HTTP errors, cancellation, invalid configuration, and malformed/missing answers fail closed.
+A small deterministic layer always denies catastrophic root/disk destruction, protected-branch force pushes with clear targets, unresolved destructive targets, credential access/exfiltration, and edits to gate configuration. Other extension edits follow normal protected-write evaluation. Transport/auth/timeouts, HTTP errors, cancellation, invalid configuration, and malformed/missing answers fail closed.
 
 Valid model uncertainty is distinct from transport failure. Hazard-question middle bands are ignored unless a hazard is clearly found; uncertainty on a required condition (currently downloaded-code execution) blocks by default. This keeps normal work quiet without treating “no answer” as permission.
 

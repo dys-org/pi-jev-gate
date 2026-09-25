@@ -62,12 +62,13 @@ describe("local policy", () => {
     assert.equal(classifyToolCall({ toolName: "read", input: { path: "../.env" } }, CWD).action, "deny");
   });
 
-  it("hard-denies permission-gate tampering", () => {
-    assert.equal(classifyToolCall(bash("rm -rf ~/.pi/agent/extensions/pi-jev-gate"), CWD).action, "deny");
-    assert.equal(
-      classifyToolCall({ toolName: "edit", input: { path: "/Users/dev/.pi/agent/extensions/pi-jev-gate/src/policy.ts" } }, CWD).action,
-      "deny",
-    );
+  it("judges extension edits normally while protecting gate configuration", () => {
+    assert.equal(classifyToolCall(bash("mv ~/.pi/agent/extensions/jev-router.ts /tmp/router.ts"), CWD).action, "judge");
+    const extension = classifyToolCall({ toolName: "edit", input: { path: join(HOME, ".pi/agent/extensions/jev-router.ts") } }, CWD);
+    assert.equal(extension.action, "judge");
+    if (extension.action === "judge") assert.deepEqual(extension.call.reasons, ["write outside the working directory", "agent, Git, or hook configuration"]);
+    assert.equal(classifyToolCall({ toolName: "edit", input: { path: "src/jev-router.ts" } }, CWD).action, "allow");
+    assert.equal(classifyToolCall({ toolName: "edit", input: { path: join(HOME, ".pi/agent/pi-jev-gate.json") } }, CWD).action, "deny");
   });
 
   it("judges outside and protected writes without including their bodies", () => {
