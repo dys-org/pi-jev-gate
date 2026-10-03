@@ -52,6 +52,10 @@ const HARD_COMMANDS: readonly [string, RegExp][] = [
     "forced push to a protected branch",
     /\bgit\b(?=[^\n;&|]*\bpush\b)(?=[^\n;&|]*(?:--force(?:-with-lease)?|-[^\s;&|]*f[^\s;&|]*))[^\n;&|]*\b(?:main|master|production|prod)\b/i,
   ],
+  [
+    "forced refspec push to a protected branch",
+    /\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*\s["']?\+(?:[^\s:;|&]+:)?(?:refs\/heads\/)?(?:main|master|production|prod)["']?(?=\s|$)/i,
+  ],
   ["Pi credential store access", /(?:\.pi|pi)[\\/]agent[\\/]auth\.json\b/i],
   [
     "credential file access",
@@ -68,6 +72,8 @@ const HARD_COMMANDS: readonly [string, RegExp][] = [
 ];
 
 const DANGEROUS_COMMANDS: readonly [string, RegExp][] = [
+  ["Git remote mutation", /\bgit\b[^\n;&|]*\bpush\b/i],
+  ["package registry mutation", /\b(?:npm|pnpm|yarn|bun)\b[^\n;&|]*\b(?:publish|unpublish|dist-tag|owner|access|deprecate|org|team|profile|token|login|logout|star|unstar)\b/i],
   ["recursive/forced deletion", /\brm\b[^\n;&|]*\s-(?:[^\s;&|]*[rR][^\s;&|]*[fF]?|[^\s;&|]*[fF][^\s;&|]*[rR])\b|\bfind\b[^\n;&|]*\s-delete\b/i],
   ["package execution or publishing", /\b(?:npm|pnpm|yarn|bun|pip|pip3|uv|poetry|cargo|gem|go)\b[^\n;&|]*\b(?:exec|run|dlx|publish)\b|\b(?:npx|bunx|pipx|uvx)\b/i],
   ["privilege or broad permission change", /\bsudo\b|\bchmod\b[^\n;&|]*\b777\b|\b(?:chmod|chown)\b[^\n;&|]*\s(?:-R|--recursive)\b/i],
@@ -76,12 +82,21 @@ const DANGEROUS_COMMANDS: readonly [string, RegExp][] = [
   ["downloaded script execution", /\b(?:curl|wget)\b[^\n;&|]*(?:\|\s*(?:sh|bash|zsh)\b|\b(?:sh|bash|zsh)\s*<\s*\()/i],
   ["network upload of local data", /\b(?:curl|wget)\b[^\n;&|]*(?:\s-d\s*@|\s--data(?:-binary|-raw|-urlencode)?\s*@|\s-T\s|\s--upload-file\b|\s-F\s[^\s;&|]*=@)|\b(?:scp|rsync|sftp)\b/i],
   ["raw network connection", /\b(?:nc|ncat|netcat|telnet)\b/i],
+  ["find execution or file output", /\bfind\b[^\n;&|]*\s-(?:exec(?:dir)?|ok(?:dir)?|fprint0?|fprintf|fls)\b/i],
+  ["sort file output", /\bsort\b[^\n;&|]*\s(?:-[^\s-]*o|--output)(?:\S*|\s)/i],
+  ["reverse hex write", /\bxxd\b[^\n;&|]*\s-(?:r|revert)\b/i],
+  ["Git file output", /\bgit\b[^\n;&|]*\s--output(?:=|\s)/i],
+  ["search preprocessor execution", /\b(?:rg|ripgrep)\b[^\n;&|]*\s--pre(?:=|\s)/i],
+  // Conservative: without operand parsing, multi-argument uniq may name an output file.
+  ["possible uniq file output", /\buniq\s+\S+\s+\S+/i],
+  ["system clock or hostname mutation", /\bdate\b[^\n;&|]*\s(?:-s|--set)(?:=|\s)|\bhostname\s+(?!-)[^\s;&|]+/i],
+  ["Git remote configuration mutation", /\bgit\s+remote\s+(?:add|remove|rm|rename|set-url|set-head|prune|update)\b/i],
 ];
 
 const READ_ONLY = [
   /^(?:pwd|whoami|hostname|date)(?:\s|$)/,
   /^(?:cd|ls|tree|cat|bat|head|tail|wc|file|stat|realpath|readlink|basename|dirname|du|df|find|grep|rg|ag|jq|diff|cmp|sort|uniq|cut|column|nl|xxd)(?:\s|$)/,
-  /^git\s+(?:status|diff|log|show|branch(?:\s*$)|remote(?:\s+-v)?|blame|shortlog|describe|rev-parse|ls-files|ls-tree|worktree\s+list|stash\s+list|tag(?:\s*$))(?:\s|$)/,
+  /^git\s+(?:status|diff|log|show|branch(?:\s*$)|remote(?:\s+-v)?(?=\s*$)|blame|shortlog|describe|rev-parse|ls-files|ls-tree|worktree\s+list|stash\s+list|tag(?:\s*$))(?:\s|$)/,
   /^(?:node|npm|python|python3|uv|cargo|gh)\s+--version(?:\s|$)|^go\s+version(?:\s|$)|^uname(?:\s|$)/,
 ];
 
@@ -172,7 +187,8 @@ export function classifyToolCall(event: ToolCall, cwd: string): LocalDecision {
     const reasons = DANGEROUS_COMMANDS.filter(([, pattern]) => pattern.test(raw)).map(([name]) => name);
     if (isTrustedDevelopmentChain(raw, reasons)) return { action: "allow" };
 
-    const command = redactSecrets(raw).slice(0, 4000);
+    const command = redactSecrets(raw);
+    if (command.length > 4000) return deny("evaluated command is too long; truncation would hide part of the action");
     return {
       action: "judge",
       call: {

@@ -15,15 +15,15 @@ describe("provider configuration", () => {
   it("persists only the explicit provider and stores no key", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jev-config-"));
     const path = join(dir, "pi-jev-gate.json");
-    await writeProvider("vercel", path);
-    assert.equal(await readProvider(path), "vercel");
-    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { provider: "vercel" });
+    await writeProvider("vercel-ai-gateway", path);
+    assert.equal(await readProvider(path), "vercel-ai-gateway");
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { provider: "vercel-ai-gateway" });
   });
 
   it("rejects malformed, unknown, and extra configuration", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jev-config-"));
     const path = join(dir, "config.json");
-    for (const value of ["{", '{"provider":"other"}', '{"provider":"typesafe","key":"secret"}']) {
+    for (const value of ["{", "null", "[]", '{"provider":"other"}', '{"provider":"vercel"}', '{"provider":"typesafe","model":"arbitrary"}', '{"provider":"typesafe","key":"secret"}']) {
       await writeFile(path, value);
       await assert.rejects(readProvider(path), /Invalid Jev gate configuration/);
     }

@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const PROVIDERS = ["typesafe", "openrouter", "vercel"] as const;
+export const PROVIDERS = ["typesafe", "openrouter", "vercel-ai-gateway"] as const;
 export type JevProvider = (typeof PROVIDERS)[number];
 
 export function isJevProvider(value: unknown): value is JevProvider {
@@ -31,7 +31,7 @@ export async function readProvider(path = configPath()): Promise<JevProvider> {
   const provider = (value as { provider?: unknown } | null)?.provider;
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 1 ||
       !isJevProvider(provider)) {
-    throw new Error('Invalid Jev gate configuration: expected { "provider": "typesafe" | "openrouter" | "vercel" }.');
+    throw new Error('Invalid Jev gate configuration: expected { "provider": "typesafe" | "openrouter" | "vercel-ai-gateway" }.');
   }
   return provider;
 }

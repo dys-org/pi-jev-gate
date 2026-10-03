@@ -1,14 +1,16 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, InputSource } from "@earendil-works/pi-coding-agent";
-import { configPath, isJevProvider, readProvider, writeProvider, type JevProvider } from "./config.ts";
-import { judgeWithJev, type JevDependencies } from "./jev.ts";
+import { PROVIDERS, configPath, isJevProvider, readProvider, writeProvider, type JevProvider } from "./config.ts";
+import { judgeWithJev, type JevRegistry } from "./jev.ts";
 import { classifyToolCall, redactSecrets, type ToolCall } from "./policy.ts";
 
 export type GateContext = {
   cwd: string;
   intent?: string;
-  modelRegistry: { getProviderAuth(provider: string): Promise<{ auth: { apiKey?: string } } | undefined> };
+  referencedProposal?: string;
+  intentIncomplete?: boolean;
+  modelRegistry: JevRegistry;
   signal?: AbortSignal;
 };
 
@@ -21,30 +23,59 @@ export function createGateControl() {
   };
 }
 
-export function createIntentTracker() {
-  const messages: string[] = [];
-  return {
-    record(text: string, source: InputSource) {
-      if (source !== "interactive" && source !== "rpc") return;
-      const bounded = redactSecrets(text).trim().slice(0, 1_000);
-      if (bounded) messages.push(bounded);
-      if (messages.length > 3) messages.shift();
-    },
-    value() { return messages.join("\n\n").slice(0, 2_400); },
-    clear() { messages.length = 0; },
-  };
+// Only an entirely flat, unindented numbered list can supply reference context.
+// Reject preamble, trailing prose, and continuations rather than dropping restrictions.
+function selectedAssistantItem(user: string, assistant: string): string {
+  const selection = /^(?:do|run|try|use|go with)\s+#?([1-9]\d*)(?=$|[\s;,.?!])/i.exec(user);
+  if (!selection || /^\s*(?:and|or|&|,|\/|-)\s*#?\d/i.test(user.slice(selection[0].length))) return "";
+  const items = new Map<string, string>();
+  for (const line of assistant.split("\n")) {
+    if (!line.trim()) continue;
+    const item = /^([1-9]\d*)[.)]\s+\S.*$/.exec(line);
+    if (!item || items.has(item[1]!)) return "";
+    items.set(item[1]!, line);
+  }
+  return items.get(selection[1]!) ?? "";
 }
 
-async function apiKeyFor(provider: JevProvider, ctx: GateContext): Promise<string | undefined> {
-  if (provider === "typesafe") return process.env.TYPESAFE_API_KEY;
-  const providerId = provider === "openrouter" ? "openrouter" : "vercel-ai-gateway";
-  return (await ctx.modelRegistry.getProviderAuth(providerId))?.auth.apiKey;
+export function createIntentTracker() {
+  const messages: string[] = [];
+  let lastAssistant = "";
+  let referencedProposal = "";
+  let intentIncomplete = false;
+  return {
+    record(text: string, source: InputSource) {
+      if (source !== "interactive" && source !== "rpc") { lastAssistant = ""; return; }
+      const redacted = redactSecrets(text).trim();
+      if (!redacted) { lastAssistant = ""; referencedProposal = ""; return; }
+      const oversized = redacted.length > 1_000;
+      const shorthand = /^(?:do|run|try|use|go with)\s+(?:#?[1-9]\d*|it|that)(?=$|[\s;,.?!])/i.test(redacted);
+      referencedProposal = oversized ? "" : selectedAssistantItem(redacted, lastAssistant);
+      intentIncomplete = oversized || (shorthand && !referencedProposal);
+      lastAssistant = "";
+      // Never treat a clipped prefix as intent: the omitted suffix may cancel it.
+      messages.push(oversized ? "(latest user input exceeded the intent limit; not authorization)" : redacted);
+      if (messages.length > 3) messages.shift();
+    },
+    recordAssistant(text: string) {
+      const redacted = redactSecrets(text);
+      lastAssistant = redacted.length <= 1_200 ? redacted : "";
+    },
+    value() {
+      const recent = [...messages];
+      while (recent.join("\n\n").length > 2_400) recent.shift();
+      return recent.join("\n\n");
+    },
+    referencedProposal() { return referencedProposal; },
+    intentIncomplete() { return intentIncomplete; },
+    clear() { messages.length = 0; lastAssistant = ""; referencedProposal = ""; intentIncomplete = false; },
+  };
 }
 
 export async function handleToolCall(
   event: ToolCall,
   ctx: GateContext,
-  overrides: Partial<JevDependencies> & { configFile?: string } = {},
+  overrides: { provider?: JevProvider; configFile?: string } = {},
 ): Promise<{ block: true; reason: string } | undefined> {
   const local = classifyToolCall(event, ctx.cwd);
   if (local.action === "allow") return undefined;
@@ -58,11 +89,9 @@ export async function handleToolCall(
 
   const verdict = await judgeWithJev(local.call, {
     cwd: ctx.cwd, isGitRepository: existsSync(join(ctx.cwd, ".git")), intent: ctx.intent ?? "",
+    referencedProposal: ctx.referencedProposal, intentIncomplete: ctx.intentIncomplete,
   }, {
-    provider,
-    getApiKey: overrides.getApiKey ?? (() => apiKeyFor(provider, ctx)),
-    ...(overrides.fetch ? { fetch: overrides.fetch } : {}),
-    ...(overrides.timeoutMs ? { timeoutMs: overrides.timeoutMs } : {}),
+    provider, modelRegistry: ctx.modelRegistry,
   }, ctx.signal);
 
   if (verdict.kind === "allow") return undefined;
@@ -97,7 +126,7 @@ export default function jevGate(pi: ExtensionAPI): void {
         ctx.ui.notify(`Jev gate provider set to ${parts[1]}.`, "info");
         return;
       }
-      ctx.ui.notify("Usage: /jev-gate off|on|provider [typesafe|openrouter|vercel]", "error");
+      ctx.ui.notify(`Usage: /jev-gate off|on|provider [${PROVIDERS.join("|")}]`, "error");
     },
   });
   pi.on("session_start", async (_event, ctx) => {
@@ -105,9 +134,18 @@ export default function jevGate(pi: ExtensionAPI): void {
     catch (error) { ctx.ui.notify(`${(error as Error).message} (${configPath()})`, "error"); }
   });
   pi.on("input", (event) => { intent.record(event.text, event.source); });
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "assistant") return;
+    // Partial or interim tool-calling answers may omit a later qualification.
+    const text = event.message.stopReason === "stop"
+      ? event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n") : "";
+    intent.recordAssistant(text);
+  });
   pi.on("session_tree", () => { intent.clear(); });
   pi.on("tool_call", (event, ctx) => {
     if (!gate.isEnabled()) return;
-    return handleToolCall(event as ToolCall, { ...ctx, intent: intent.value() });
+    return handleToolCall(event as ToolCall, {
+      ...ctx, intent: intent.value(), referencedProposal: intent.referencedProposal(), intentIncomplete: intent.intentIncomplete(),
+    });
   });
 }

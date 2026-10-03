@@ -1,6 +1,6 @@
 {
   "name": "@dys-org/pi-jev-gate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A fail-closed Jev permission gate for Pi",
   "keywords": [
     "pi-package",
@@ -35,6 +35,7 @@
     "access": "public"
   },
   "scripts": {
+    "eval": "node --experimental-strip-types eval/run.ts",
     "test": "node --test --experimental-strip-types --test-reporter=spec 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit",
     "check": "pnpm typecheck && pnpm test"
@@ -43,6 +44,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "*",
     "typescript": "*"
