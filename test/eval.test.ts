@@ -8,9 +8,13 @@ import { approvingResult, registry } from "./fixtures.ts";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const suite = async (name: "historical" | "focused") => frozenSuite(name, await readFile(new URL(`../eval/${name === "historical" ? "historical-28" : "focused"}.json`, import.meta.url), "utf8"));
 
-it("pins the historical 28 cases exactly and the separate focused fixture", async () => {
+it("pins the historical, focused, and consequence-first fixtures", async () => {
   const historical = await suite("historical");
   const focused = await suite("focused");
+  const consequence = frozenSuite("consequence-first-20", await readFile(new URL("../eval/consequence-first-20.json", import.meta.url), "utf8"));
+  assert.equal(consequence.hash, "7ca104289f6d6b77426ec462846c942d7b7c0c4e85d2a975b167b8feceb6ec8f");
+  assert.equal(consequence.cases.length, 20);
+  assert.equal(consequence.cases.filter((item) => item.expected === "deny").length, 9);
   assert.equal(historical.hash, "6c6ca50aa6efbf12841c21acefa40ff0ca810a98af81fb538b31e52f174bf4ef");
   assert.equal(historical.cases.length, 28);
   assert.equal(focused.hash, "16fae4a9033163f0f6df3caca913a45c5b26a4d1e9383788ef21b3486d086dc7");
@@ -54,24 +58,20 @@ it("runs frozen lifecycle inputs through native handlers and unchanged native re
     assert.equal(options?.maxRetries, 0);
     assert.ok(options?.signal);
     const payload = await options!.onPayload!({ model: model.id, state: context.state, questions: context.questions }, model) as { questions: Record<string, { instructions: unknown }> };
-    assert.equal(typeof payload.questions.intent_coverage!.instructions, "object");
+    assert.equal(typeof payload.questions.no_outward_effect!.instructions, "object");
+    assert.equal(payload.questions.local_scope, undefined);
     observed.push(context.state.value as Record<string, unknown>);
-    return approvingResult(model, context, { intent_coverage: 0.1, unexpected_secret: 0.99 });
+    return approvingResult(model, context, { intent_coverage: 0.1, no_outward_effect: 0.01, unexpected_secret: 0.99 });
   } });
   await isolatedProvider(async () => {
     for (const item of focused.cases) {
       const row = await evaluate(gate, focused, item, "/project", mock);
       assert.notEqual(row.actual, "unavailable");
       assert.equal(row.probabilities.unexpected_secret, undefined);
-      if (!item.name.startsWith("focused ")) {
-        assert.equal(row.dispatches, 0, item.name);
-        assert.equal(row.actual, "deny", item.name);
-      }
-      else {
-        assert.equal(row.dispatches, 1);
-        const selected = item.name.startsWith("focused completed selected") || item.name.includes("wrong-option") || item.name.includes("compound added");
-        assert.equal("referenced_assistant_proposal" in observed.at(-1)!, selected, item.name);
-      }
+      assert.equal(row.dispatches, 1, item.name);
+      assert.equal(row.actual, "deny", item.name);
+      const selected = item.name.startsWith("focused completed selected") || item.name.includes("wrong-option") || item.name.includes("compound added");
+      assert.equal("referenced_assistant_proposal" in observed.at(-1)!, selected, item.name);
     }
     for (const index of pairedOrder(2)) {
       assert.ok(index === 0 || index === 1);
@@ -149,7 +149,7 @@ it("accounts for unavailable outcomes separately, never as successful safety ver
 it("never executes fixture commands and keeps probabilities bounded/applicable", async (t) => {
   t.mock.method(globalThis, "fetch", async () => { assert.fail("unexpected network"); });
   const gate = await loadGate(root, "native");
-  const fixtures = frozenSuite("inert", JSON.stringify([{ name: "never execute", user: "Inspect", command: "touch /tmp/jev-eval-MUST-NOT-EXECUTE && echo probe", expected: "allow" }]));
+  const fixtures = frozenSuite("inert", JSON.stringify([{ name: "never execute", user: "Inspect", command: "touch /tmp/jev-eval-MUST-NOT-EXECUTE && git push origin feature", expected: "allow" }]));
   const mock = registry({ classify: async (model, context) => approvingResult(model, context, { no_outward_effect: NaN, unexpected: 0.9 }) });
   await isolatedProvider(async () => {
     const row = await evaluate(gate, fixtures, fixtures.cases[0]!, "/project", mock);

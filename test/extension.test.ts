@@ -121,7 +121,6 @@ describe("session gate control", () => {
 
 describe("recent user intent", () => {
   it("uses only completed assistant proposals through registered message/input/tool handlers", async () => {
-    // A missing config in an isolated test directory selects TypeSafe; no real config is changed.
     const dir = await mkdtemp(join(tmpdir(), "jev-handler-"));
     const previous = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = dir;
@@ -145,23 +144,24 @@ describe("recent user intent", () => {
         message: { role: "assistant", stopReason, content: text ? [{ type: "text", text }] : [] },
       }, ctx);
       const push = () => handlers.get("tool_call")!({ toolName: "bash", input: { command: "git push origin feature" } }, ctx);
-      const selectAndCall = async (blocked = false) => {
+      const selectAndCall = async () => {
         handlers.get("input")!({ text: "do 2", source: "interactive" }, ctx);
-        const result = await push() as { block: boolean } | undefined;
-        assert.equal(result?.block, blocked ? true : undefined);
+        assert.equal(await push(), undefined);
       };
       const completed = "1. Inspect status\n2. git push origin feature";
       answer("stop", completed);
       await selectAndCall();
       assert.deepEqual(states.map((state) => state.referenced_assistant_proposal), ["2. git push origin feature"]);
       for (const reason of ["stop", "pending", "length", "toolUse", "error", "aborted", "deferred"] as const) {
-        answer("stop", completed); // A fresh candidate must be invalidated, not reused.
+        answer("stop", completed);
         answer(reason, reason === "stop" ? "" : "1. Inspect\n2. npm publish");
         const count = states.length;
         const discoveryCount = discoveries;
-        await selectAndCall(true);
-        assert.equal(states.length, count, reason);
-        assert.equal(discoveries, discoveryCount, reason);
+        await selectAndCall();
+        assert.equal(states.length, count + 1, reason);
+        assert.equal(discoveries, discoveryCount + 1, reason);
+        assert.equal(states.at(-1)!.referenced_assistant_proposal, undefined);
+        assert.equal(states.at(-1)!.user_intent, "(incomplete user intent; not authorization)");
       }
       answer("stop", completed);
       handlers.get("input")!({ text: "do 2", source: "interactive" }, ctx);
@@ -176,12 +176,12 @@ describe("recent user intent", () => {
         assert.equal("referenced_assistant_proposal" in states.at(-1)!, false);
       };
       handlers.get("session_tree")!({}, ctx);
-      await assertClearedCall(); // No new input can mask a stale selected authorization.
-      await selectAndCall(true);
+      await assertClearedCall();
+      await selectAndCall();
       answer("toolUse", "");
-      assert.equal((await push() as { block: boolean }).block, true);
+      assert.equal(await push(), undefined);
       handlers.get("session_tree")!({}, ctx);
-      await assertClearedCall(); // Navigation also clears the unresolved precondition.
+      await assertClearedCall();
       const count = states.length;
       assert.equal(await handlers.get("tool_call")!({ toolName: "bash", input: { command: "git status" } }, ctx), undefined);
       assert.equal(states.length, count);

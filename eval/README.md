@@ -1,6 +1,29 @@
-# Metadata-only evaluation — post-patch native smoke passed once
+# Metadata-only evaluation
 
-The authoritative checkout is `/Users/dev/Projects/@dys-org/pi-jev-gate`. This runner does not create an agent session, register/execute tools, invoke a shell, or start a subprocess. Fixture commands are strings supplied only to policy/classifier interception. Offline is the default; real runtime/authentication are initialized only with explicit `--live`. The separately approved single native post-patch smoke completed; no additional live batch is authorized by this document.
+**Current policy:** consequence-first routing allows routine/unknown commands locally, removes the scope and authorization vetoes, and allows valid model uncertainty. Incomplete intent disables consequence overrides rather than causing local denial. The new 20-case live smoke below exercises this policy. Historical/post-patch results elsewhere on this page describe earlier versions and do not validate these changes.
+
+The authoritative checkout is `/Users/dev/Projects/@dys-org/pi-jev-gate`. This runner does not create an agent session, register/execute tools, invoke a shell, or start a subprocess. Fixture commands are strings supplied only to policy/classifier interception. Offline is the default; real runtime/authentication are initialized only with explicit `--live`. The earlier native post-patch smoke and the separately user-approved consequence-first smoke have completed. No further live batch is authorized by this document.
+
+## Consequence-first live smoke
+
+The user approved one 20-case synthetic batch with a $0.10 ceiling. Only synthetic command/intent metadata was evaluated; fixture commands were never executed. Pi's saved TypeSafe API key was used because `TYPESAFE_API_KEY` was not exported. Production questions, thresholds, four-second deadline, no retries, and native interception remained unchanged. The evaluator used synthetic cwd `/workspace/project` and did not send repository contents.
+
+- Fixture: [`consequence-first-20.json`](consequence-first-20.json), SHA-256 `7ca104289f6d6b77426ec462846c942d7b7c0c4e85d2a975b167b8feceb6ec8f`.
+- Runner: [`consequence-smoke.ts`](consequence-smoke.ts); defaults to offline, requires `--live` for API calls, restricts the HTTP endpoint, rejects long-context mode, caps at 20 attempts, and stops on the first unavailable result. No auto-retries or tuning rounds.
+- Live evidence: [`consequence-first.live.jsonl`](consequence-first.live.jsonl), including exact synthetic request payloads, probabilities, source/fixture/runner hashes, model version, and reported token usage. No credentials or auth headers are logged.
+- Result: **20/20 matched** — safety **9/9**, usability **11/11**, **0 unsafe allows**, **0 unavailable**. Five local allows, three local hard denials, twelve live classifier requests. All responses reported `jev-1.14.0`.
+- Reported input usage: **14,776 tokens**. At the published $0.042/M input tokens (output free), estimated usage cost is **$0.000620592**. The conservative ceiling for 12 full 64k-context attempts was **$0.032256**; the configured 20-attempt ceiling is **$0.05376**, below the approved $0.10 budget. These are rate-based estimates, not a billing receipt.
+- [`consequence-first.offline.jsonl`](consequence-first.offline.jsonl) is a separate uniform-0.99 plumbing run, **not live accuracy evidence**.
+
+Coverage includes the original documentation-fetch use cases, protected-path inspection, explicit GET queries, dependency installation, generated-output cleanup, requested/unrequested source deletion and pushes/publication, private/public uploads, privileged system changes, incomplete intent, and deterministic credential/root/force-push denials. This single small batch does not establish general model accuracy, verify every override branch, or replace a normal-session field test. No production policy was retuned against these results.
+
+For offline reproduction only:
+
+```sh
+node --experimental-strip-types eval/consequence-smoke.ts
+```
+
+A future `--live` rerun requires separate approval; the completed batch did not authorize repetitions.
 
 ## Frozen inputs
 

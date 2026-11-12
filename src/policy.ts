@@ -71,58 +71,53 @@ const HARD_COMMANDS: readonly [string, RegExp][] = [
   ],
 ];
 
-const DANGEROUS_COMMANDS: readonly [string, RegExp][] = [
+const SECURITY_TARGET = /(?:\.github[\\/]workflows[\\/]|\.git[\\/]hooks[\\/]|\/(?:etc|System)[\\/])/i;
+const MUTATING_HTTP_METHOD = /(?:^|\s)(?:-X\s*|--(?:request|method)(?:=|\s+))["']?(?:POST|PUT|PATCH|DELETE)["']?(?=\s|$)/i;
+const READ_ONLY_HTTP_METHOD = /(?:^|\s)(?:-X\s*|--method(?:=|\s+))["']?(?:GET|HEAD)["']?(?=\s|$)/i;
+
+function changesSecurityConfiguration(command: string): boolean {
+  return command.split(/[\n;&|]/).some((part) => {
+    if (SECURITY_TARGET.test(part) && /\b(?:cp|mv|install|tee|touch|truncate|chmod|chown|mkdir|rmdir)\b|\b(?:sed|perl)\b[^\n;&|]*\s-[^\s;&|]*i|\bgit\b[^\n;&|]*\b(?:checkout|restore|apply|reset)\b/.test(part)) return true;
+    const outputCommand = /\b(?:curl|wget|sort|git)\b/.test(part) ? part : "";
+    const outputs = [
+      ...part.matchAll(/(?:^|[^<])>>?\s*(?:"([^"]*)"|'([^']*)'|([^\s<>]+))/g),
+      ...outputCommand.matchAll(/(?:^|\s)(?:-[oO]\s*|--output(?:-document)?(?:=|\s+))(?:"([^"]*)"|'([^']*)'|([^\s<>]+))/g),
+    ];
+    return outputs.some((match) => SECURITY_TARGET.test(match[1] ?? match[2] ?? match[3]!));
+  });
+}
+
+function mutatesRemoteApi(command: string): boolean {
+  for (const match of command.matchAll(/\b(curl|wget|gh\s+api)\b([^\n;&|]*)/gi)) {
+    const tool = match[1]!.toLowerCase();
+    const args = match[2]!;
+    if (MUTATING_HTTP_METHOD.test(args)) return true;
+    if (tool === "curl" && /\s(?:-d|--data(?:-binary|-raw|-urlencode)?)(?:\s|=)/.test(args)) return true;
+    if (tool === "wget" && /\s--(?:post|body)-(?:data|file)(?:\s|=)/.test(args)) return true;
+    if (tool.startsWith("gh")) {
+      if (/\s(?:-F\s*|--field(?:\s+|=))[^\s]*=@/.test(args)) return true;
+      if (/\s(?:-[fF]|--(?:field|raw-field)(?=\s|=))/.test(args) && !READ_ONLY_HTTP_METHOD.test(args)) return true;
+    }
+  }
+  return false;
+}
+
+const DANGEROUS_COMMANDS: readonly [string, RegExp | ((command: string) => boolean)][] = [
   ["Git remote mutation", /\bgit\b[^\n;&|]*\bpush\b/i],
-  ["package registry mutation", /\b(?:npm|pnpm|yarn|bun)\b[^\n;&|]*\b(?:publish|unpublish|dist-tag|owner|access|deprecate|org|team|profile|token|login|logout|star|unstar)\b/i],
-  ["recursive/forced deletion", /\brm\b[^\n;&|]*\s-(?:[^\s;&|]*[rR][^\s;&|]*[fF]?|[^\s;&|]*[fF][^\s;&|]*[rR])\b|\bfind\b[^\n;&|]*\s-delete\b/i],
-  ["package execution or publishing", /\b(?:npm|pnpm|yarn|bun|pip|pip3|uv|poetry|cargo|gem|go)\b[^\n;&|]*\b(?:exec|run|dlx|publish)\b|\b(?:npx|bunx|pipx|uvx)\b/i],
+  ["package registry mutation", /\b(?:npm|pnpm|yarn|bun)\b[^\n;&|]*\b(?:publish|unpublish|dist-tag|owner|access|deprecate|org|team|profile|token|login|logout|star|unstar)\b|\b(?:uv|poetry|cargo)\b[^\n;&|]*\bpublish\b|\bgem\b[^\n;&|]*\b(?:push|yank)\b/i],
+  ["deletion of existing files", /\brm\s|\bfind\b[^\n;&|]*\s-delete\b|\btruncate\s/i],
+  ["deployment or infrastructure mutation", /\b(?:deploy|terraform\s+(?:apply|destroy)|pulumi\s+(?:up|destroy)|kubectl\s+(?:apply|delete|replace|patch)|aws\b[^\n;&|]*\b(?:delete-[\w-]+|terminate-instances))\b/i],
   ["privilege or broad permission change", /\bsudo\b|\bchmod\b[^\n;&|]*\b777\b|\b(?:chmod|chown)\b[^\n;&|]*\s(?:-R|--recursive)\b/i],
   ["destructive Git operation", /\bgit\b[^\n;&|]*\b(?:reset\b[^\n;&|]*--hard|clean\b[^\n;&|]*-[^\s;&|]*f|push\b[^\n;&|]*--(?:force|force-with-lease|mirror)|branch\b[^\n;&|]*-D|tag\b[^\n;&|]*-d|rm\b)/i],
   ["container or volume destruction", /\bdocker\b[^\n;&|]*(?:system\s+prune|volume\s+(?:rm|prune)|compose\b[^\n;&|]*down\b[^\n;&|]*(?:-v|--volumes))/i],
   ["downloaded script execution", /\b(?:curl|wget)\b[^\n;&|]*(?:\|\s*(?:sh|bash|zsh)\b|\b(?:sh|bash|zsh)\s*<\s*\()/i],
   ["network upload of local data", /\b(?:curl|wget)\b[^\n;&|]*(?:\s-d\s*@|\s--data(?:-binary|-raw|-urlencode)?\s*@|\s-T\s|\s--upload-file\b|\s-F\s[^\s;&|]*=@)|\b(?:scp|rsync|sftp)\b/i],
+  ["remote API mutation", mutatesRemoteApi],
   ["raw network connection", /\b(?:nc|ncat|netcat|telnet)\b/i],
-  ["find execution or file output", /\bfind\b[^\n;&|]*\s-(?:exec(?:dir)?|ok(?:dir)?|fprint0?|fprintf|fls)\b/i],
-  ["sort file output", /\bsort\b[^\n;&|]*\s(?:-[^\s-]*o|--output)(?:\S*|\s)/i],
-  ["reverse hex write", /\bxxd\b[^\n;&|]*\s-(?:r|revert)\b/i],
-  ["Git file output", /\bgit\b[^\n;&|]*\s--output(?:=|\s)/i],
-  ["search preprocessor execution", /\b(?:rg|ripgrep)\b[^\n;&|]*\s--pre(?:=|\s)/i],
-  // Conservative: without operand parsing, multi-argument uniq may name an output file.
-  ["possible uniq file output", /\buniq\s+\S+\s+\S+/i],
+  ["security configuration change", changesSecurityConfiguration],
   ["system clock or hostname mutation", /\bdate\b[^\n;&|]*\s(?:-s|--set)(?:=|\s)|\bhostname\s+(?!-)[^\s;&|]+/i],
   ["Git remote configuration mutation", /\bgit\s+remote\s+(?:add|remove|rm|rename|set-url|set-head|prune|update)\b/i],
 ];
-
-const READ_ONLY = [
-  /^(?:pwd|whoami|hostname|date)(?:\s|$)/,
-  /^(?:cd|ls|tree|cat|bat|head|tail|wc|file|stat|realpath|readlink|basename|dirname|du|df|find|grep|rg|ag|jq|diff|cmp|sort|uniq|cut|column|nl|xxd)(?:\s|$)/,
-  /^git\s+(?:status|diff|log|show|branch(?:\s*$)|remote(?:\s+-v)?(?=\s*$)|blame|shortlog|describe|rev-parse|ls-files|ls-tree|worktree\s+list|stash\s+list|tag(?:\s*$))(?:\s|$)/,
-  /^(?:node|npm|python|python3|uv|cargo|gh)\s+--version(?:\s|$)|^go\s+version(?:\s|$)|^uname(?:\s|$)/,
-];
-
-const SHELL_STRUCTURE = /[\r\n;&|<>$`()\\]/;
-
-function isReadOnly(command: string): boolean {
-  const value = command.trim();
-  return !SHELL_STRUCTURE.test(value) && READ_ONLY.some((pattern) => pattern.test(value));
-}
-
-function isTrustedProjectCommand(command: string): boolean {
-  const value = command.trim();
-  if (!value || SHELL_STRUCTURE.test(value)) return false;
-  if (/\b(?:deploy|publish|release|production|prod)\b/i.test(value)) return false;
-  if (/^\.\/[A-Za-z0-9_./-]+(?:\s|$)/.test(value)) return true;
-  if (/^(?:make|just|task)(?:\s|$)|^mise\s+(?:run|x)(?:\s|$)/.test(value)) return true;
-  if (/^(?:npm|pnpm|yarn|bun)\s+(?!add\b|install\b|update\b|upgrade\b|exec\b|dlx\b|x\b|publish\b)(?:run\s+)?[^\s-][^\s]*(?:\s|$)/.test(value)) return true;
-  return /^(?:(?:uv|poetry)\s+run\s+(?:pytest|python3?\s+-m\s+(?:pytest|unittest))|bundle\s+exec\s+(?:rspec|rake(?:\s+test)?)|cargo\s+(?:test|build|check|clippy|fmt)|go\s+(?:test|build|vet|fmt)|pytest|python3?\s+-m\s+(?:pytest|unittest)|(?:\.\/)?gradlew?\s+(?:test|check|build)|(?:\.\/)?mvnw?\s+(?:test|verify|package)|dotnet\s+(?:test|build)|turbo\s+(?:run\s+)?(?:test|build|check|lint|typecheck)|nx\s+(?:test|build|lint))(?:\s|$)/.test(value);
-}
-
-function isTrustedDevelopmentChain(command: string, reasons: readonly string[]): boolean {
-  if (/\|\||[;|<>\n]/.test(command)) return false;
-  const trusted = command.split("&&").map((part) => part.trim()).filter(Boolean)
-    .every((part) => isReadOnly(part) || isTrustedProjectCommand(part));
-  return trusted && reasons.every((reason) => reason === "package execution or publishing");
-}
 
 function resolveToolPath(path: string, cwd: string): string {
   let normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
@@ -184,8 +179,8 @@ export function classifyToolCall(event: ToolCall, cwd: string): LocalDecision {
     const hard = HARD_COMMANDS.filter(([, pattern]) => pattern.test(raw)).map(([name]) => name);
     if (hard.length) return deny(hard.join(", "));
 
-    const reasons = DANGEROUS_COMMANDS.filter(([, pattern]) => pattern.test(raw)).map(([name]) => name);
-    if (isTrustedDevelopmentChain(raw, reasons)) return { action: "allow" };
+    const reasons = DANGEROUS_COMMANDS.filter(([, check]) => typeof check === "function" ? check(raw) : check.test(raw)).map(([name]) => name);
+    if (!reasons.length) return { action: "allow" };
 
     const command = redactSecrets(raw);
     if (command.length > 4000) return deny("evaluated command is too long; truncation would hide part of the action");
@@ -196,7 +191,7 @@ export function classifyToolCall(event: ToolCall, cwd: string): LocalDecision {
         summary: redactSecrets((raw.split("\n")[0] ?? "").trim()).slice(0, 200) || "(empty command)",
         command,
         outsideCwd: false,
-        reasons: reasons.length ? reasons : ["not a trusted development command"],
+        reasons,
       },
     };
   }
@@ -213,8 +208,8 @@ export function classifyToolCall(event: ToolCall, cwd: string): LocalDecision {
   if (permissionPath(resolved.absolute)) return deny("permission-system tampering");
   const protectedReason = protectedWrite(resolved.absolute);
   const reasons = [
-    ...(resolved.outside ? ["write outside the working directory"] : []),
     ...(protectedReason ? [protectedReason] : []),
+    ...(/^\/(?:etc|System|usr|bin|sbin)(?:\/|$)/.test(resolved.absolute) ? ["system configuration or executable"] : []),
   ];
   if (!reasons.length) return { action: "allow" };
 
