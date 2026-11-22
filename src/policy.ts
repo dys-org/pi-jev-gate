@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { protectedSet, tampersWithLoadedCode } from "./tampering.ts";
 
 export type ToolCall = { toolName: string; input: Record<string, unknown> };
 export type GatedCall = {
@@ -65,10 +66,6 @@ const HARD_COMMANDS: readonly [string, RegExp][] = [
     "credential exfiltration",
     /(?=.*\b(?:curl|wget|scp|rsync|sftp|nc|ncat|netcat)\b)(?=.*(?:\.ssh[\\/]|\.aws[\\/](?:credentials|config)|\.gnupg[\\/]|id_(?:rsa|ecdsa|ed25519)\b|\.npmrc\b|\.netrc\b))/i,
   ],
-  [
-    "permission-system tampering",
-    /(?=.*\b(?:rm|mv|cp|chmod|chown|sed|perl|python|node)\b)(?=.*(?:\.pi[\\/](?:agent[\\/])?extensions[\\/]|pi-jev-gate))/i,
-  ],
 ];
 
 const SECURITY_TARGET = /(?:\.github[\\/]workflows[\\/]|\.git[\\/]hooks[\\/]|\/(?:etc|System)[\\/])/i;
@@ -119,6 +116,14 @@ const DANGEROUS_COMMANDS: readonly [string, RegExp | ((command: string) => boole
   ["Git remote configuration mutation", /\bgit\s+remote\s+(?:add|remove|rm|rename|set-url|set-head|prune|update)\b/i],
 ];
 
+export function ordinaryPush(call: GatedCall): boolean {
+  if (call.tool !== "bash" || call.command === undefined || call.reasons.length !== 1 || call.reasons[0] !== "Git remote mutation") return false;
+  const [git, push, ...args] = call.command.trim().split(/[ \t]+/);
+  if (git !== "git" || push !== "push") return false;
+  const operands = args.filter((arg) => arg !== "-u" && arg !== "--set-upstream");
+  return operands.length <= 2 && operands.every((arg) => /^[A-Za-z0-9_][\w./-]*$/.test(arg));
+}
+
 function resolveToolPath(path: string, cwd: string): string {
   let normalized = path.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ");
   if (normalized.startsWith("@")) normalized = normalized.slice(1);
@@ -155,11 +160,6 @@ function credentialPath(path: string): boolean {
   return /^(?:\.env(?:\..+)?|\.npmrc|\.netrc|credentials(?:\.json)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|.+\.(?:pem|key|p12|pfx))$/i.test(base);
 }
 
-function permissionPath(path: string): boolean {
-  const normalized = normalizePath(path);
-  return normalized.endsWith("/.pi/agent/auth.json") || /\/\.pi\/(?:agent\/)?extensions\//.test(normalized) || /\/pi-jev-gate(?:\.json|-policy\.md)$/.test(normalized);
-}
-
 function protectedWrite(path: string): string | undefined {
   const normalized = normalizePath(path);
   if (credentialPath(path)) return "credential-bearing target";
@@ -177,6 +177,7 @@ export function classifyToolCall(event: ToolCall, cwd: string): LocalDecision {
   if (event.toolName === "bash") {
     const raw = typeof event.input.command === "string" ? event.input.command : "";
     const hard = HARD_COMMANDS.filter(([, pattern]) => pattern.test(raw)).map(([name]) => name);
+    if (tampersWithLoadedCode(raw, cwd, protectedSet(cwd))) hard.push("permission-system tampering");
     if (hard.length) return deny(hard.join(", "));
 
     const reasons = DANGEROUS_COMMANDS.filter(([, check]) => typeof check === "function" ? check(raw) : check.test(raw)).map(([name]) => name);
@@ -205,7 +206,7 @@ export function classifyToolCall(event: ToolCall, cwd: string): LocalDecision {
     return { action: "allow" };
   }
 
-  if (permissionPath(resolved.absolute)) return deny("permission-system tampering");
+  if (protectedSet(cwd).contains(resolved.absolute)) return deny("permission-system tampering");
   const protectedReason = protectedWrite(resolved.absolute);
   const reasons = [
     ...(protectedReason ? [protectedReason] : []),

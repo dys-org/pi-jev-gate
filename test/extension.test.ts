@@ -1,3 +1,4 @@
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -7,12 +8,12 @@ import type { StopReason } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import jevGate, { createGateControl, createIntentTracker, handleToolCall, type GateContext } from "../src/extension.ts";
 import { PROVIDERS } from "../src/config.ts";
-import { approvingResult, registry } from "./fixtures.ts";
+import { approvingResult, registry, said } from "./fixtures.ts";
 
 function context(intent = ""): GateContext {
   return {
     cwd: "/Users/dev/project",
-    intent,
+    intent: said(intent),
     modelRegistry: registry(),
     signal: undefined,
   };
@@ -161,7 +162,7 @@ describe("recent user intent", () => {
         assert.equal(states.length, count + 1, reason);
         assert.equal(discoveries, discoveryCount + 1, reason);
         assert.equal(states.at(-1)!.referenced_assistant_proposal, undefined);
-        assert.equal(states.at(-1)!.user_intent, "(incomplete user intent; not authorization)");
+        assert.equal(states.at(-1)!.latest_user_message, "(incomplete user intent; not authorization)");
       }
       answer("stop", completed);
       handlers.get("input")!({ text: "do 2", source: "interactive" }, ctx);
@@ -172,7 +173,7 @@ describe("recent user intent", () => {
         const count = states.length;
         assert.equal(await push(), undefined);
         assert.equal(states.length, count + 1);
-        assert.equal(states.at(-1)!.user_intent, "(no recent user message available)");
+        assert.equal(states.at(-1)!.latest_user_message, "(no recent user message available)");
         assert.equal("referenced_assistant_proposal" in states.at(-1)!, false);
       };
       handlers.get("session_tree")!({}, ctx);
@@ -202,17 +203,43 @@ describe("recent user intent", () => {
     intent.record("extension-generated instruction", "extension");
     intent.record("second", "interactive");
     intent.record(`third${"x".repeat(2_000)}`, "rpc");
-    assert.equal(intent.value(), "first\n\nsecond\n\n(latest user input exceeded the intent limit; not authorization)");
-    assert.equal(intent.intentIncomplete(), true);
-    assert.equal(intent.value().includes("extension-generated"), false);
+    assert.deepEqual(intent.snapshot(), { complete: false });
+    intent.record("push", "interactive");
+    assert.deepEqual(intent.snapshot(), { complete: true, latest: "push", earlier: ["second", "(earlier user message omitted: too long)"] });
+    intent.record(`again${"x".repeat(2_000)}`, "interactive");
+    intent.record("push now", "interactive");
+    assert.deepEqual(intent.snapshot(), { complete: true, latest: "push now", earlier: ["push", "(earlier user message omitted: too long)"] });
   });
 
   it("redacts before truncation and clears intent after branch navigation", () => {
     const intent = createIntentTracker();
     const privateKey = `-----BEGIN PRIVATE KEY-----\n${"A".repeat(1_500)}\n-----END PRIVATE KEY-----`;
     intent.record(privateKey, "interactive");
-    assert.equal(intent.value(), "<redacted-private-key>");
+    intent.record("second", "interactive");
+    assert.deepEqual(intent.snapshot(), { complete: true, latest: "second", earlier: ["<redacted-private-key>"] });
     intent.clear();
-    assert.equal(intent.value(), "");
+    assert.deepEqual(intent.snapshot(), { complete: true, latest: "", earlier: [] });
+  });
+
+  it("grounds short confirmations only in a completed answer's closing question", () => {
+    const grounded = (assistant: string, user: string) => {
+      const intent = createIntentTracker();
+      intent.recordAssistant(assistant);
+      intent.record(user, "interactive");
+      return intent.snapshot();
+    };
+    const question = "Committed as abc123.\n\nThe branch is ahead of origin/main. Should I push?";
+    for (const user of ["do it", "yes", "Yes, do it.", "go ahead", "sounds good", "ok please", "proceed!"]) {
+      assert.deepEqual(grounded(question, user), { complete: true, latest: user, earlier: [], referencedProposal: "The branch is ahead of origin/main. Should I push?" }, user);
+    }
+    for (const user of ["push", "don't push yet", "do it after tests", "yes but only to staging"]) {
+      assert.equal("referencedProposal" in grounded(question, user), false, user);
+    }
+    assert.deepEqual(grounded("Committed. The branch is ahead.", "do it"), { complete: false });
+    assert.deepEqual(grounded("Committed. The branch is ahead.", "yes, do that"), { complete: false });
+    assert.deepEqual(grounded("1. Inspect\n2. git push origin feature", "do 2"), { complete: true, latest: "do 2", earlier: [], referencedProposal: "2. git push origin feature" });
+    const redacted = grounded("Ready.\n\nShould I push with token=ghp_abcdefghijklmnopqrstuvwxyz01?", "yes");
+    assert.equal(JSON.stringify(redacted).includes("ghp_"), false);
   });
 });
+

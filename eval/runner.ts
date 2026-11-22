@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -56,7 +57,9 @@ export type Gate = {
 export async function loadGate(root: string, kind: Gate["kind"]): Promise<Gate> {
   root = resolve(root);
   const hashes: Record<string, string> = {};
-  for (const name of ["src/config.ts", "src/extension.ts", "src/jev.ts", "src/policy.ts", "package.json", "pnpm-lock.yaml"]) hashes[name] = sha256(await readFile(join(root, name)));
+  for (const name of ["src/config.ts", "src/extension.ts", "src/jev.ts", "src/policy.ts", "src/tampering.ts", "package.json", "pnpm-lock.yaml"]) {
+    if (name !== "src/tampering.ts" || existsSync(join(root, name))) hashes[name] = sha256(await readFile(join(root, name)));
+  }
   const source = await readFile(join(root, "src/jev.ts"), "utf8");
   if (kind === "native" ? !source.includes("export type JevRegistry") : !source.includes("getApiKey")) throw new Error("Source does not match the explicit evaluation interface");
   const extension = await import(pathToFileURL(join(root, "src/extension.ts")).href);
@@ -119,8 +122,7 @@ export async function evaluate(gate: Gate, suite: FrozenSuite, item: Case, cwd: 
       if (local.action !== "judge") row.actual = local.action;
       else {
         type LegacyJudge = (call: GatedCall, context: { cwd: string; intent: string; isGitRepository: boolean }, deps: { provider: "typesafe"; getApiKey: () => Promise<string | undefined>; fetch: typeof fetch }) => Promise<JevVerdict>;
-        const { existsSync } = await import("node:fs");
-        const verdict = await (gate.jev.judgeWithJev as unknown as LegacyJudge)(local.call, { cwd, intent: tracker.value(), isGitRepository: existsSync(join(cwd, ".git")) }, {
+        const verdict = await (gate.jev.judgeWithJev as unknown as LegacyJudge)(local.call, { cwd, intent: (tracker as unknown as { value(): string }).value(), isGitRepository: existsSync(join(cwd, ".git")) }, {
           provider: "typesafe", getApiKey: legacy.getApiKey,
           fetch: async (url, init) => {
             row.dispatches++;

@@ -9,8 +9,14 @@ export function isJevProvider(value: unknown): value is JevProvider {
   return typeof value === "string" && PROVIDERS.includes(value as JevProvider);
 }
 
+export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
+  const dir = env.PI_CODING_AGENT_DIR;
+  if (!dir) return join(homedir(), ".pi", "agent");
+  return dir === "~" ? homedir() : dir.startsWith("~/") ? join(homedir(), dir.slice(2)) : dir;
+}
+
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "pi-jev-gate.json");
+  return join(agentDir(env), "pi-jev-gate.json");
 }
 
 export async function readProvider(path = configPath()): Promise<JevProvider> {

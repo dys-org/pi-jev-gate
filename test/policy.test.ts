@@ -1,3 +1,4 @@
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { join } from "node:path";

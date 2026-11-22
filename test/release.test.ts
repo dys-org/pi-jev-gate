@@ -1,14 +1,15 @@
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createIntentTracker, handleToolCall } from "../src/extension.ts";
 import { judgeWithJev } from "../src/jev.ts";
 import { classifyToolCall, type GatedCall } from "../src/policy.ts";
-import { approvingResult, registry } from "./fixtures.ts";
+import { approvingResult, registry, said } from "./fixtures.ts";
 
 const cwd = "/project";
 const bash = (command: string) => ({ toolName: "bash", input: { command } });
 const flagged: GatedCall = { tool: "bash", command: "git push origin feature", summary: "push", outsideCwd: false, reasons: ["Git remote mutation"] };
-const context = { cwd, intent: "Push my feature branch", isGitRepository: true };
+const context = { cwd, intent: said("Push my feature branch"), isGitRepository: true };
 const deps = (probabilities: Record<string, number>) => ({
   provider: "typesafe" as const,
   modelRegistry: registry({ classify: async (model, request) => approvingResult(model, request, probabilities) }),
@@ -17,15 +18,15 @@ const deps = (probabilities: Record<string, number>) => ({
 describe("consequence-first release regressions (metadata only)", () => {
   it("does not treat missing authorization or model uncertainty as a hazard", async () => {
     for (const intent of [0.01, 0.4, 0.5, 0.99]) {
-      assert.equal((await judgeWithJev(flagged, context, deps({ intent_coverage: intent }))).kind, "allow");
-      assert.equal((await judgeWithJev(flagged, context, deps({ intent_coverage: intent, no_outward_effect: 0.5 }))).kind, "allow");
+      assert.equal((await judgeWithJev(flagged, context, deps({ intent_coverage: intent, push_requested: 0.01 }))).kind, "allow");
+      assert.equal((await judgeWithJev(flagged, context, deps({ intent_coverage: intent, push_requested: 0.01, no_outward_effect: 0.5 }))).kind, "allow");
     }
   });
 
   it("requires clear intent only to override an identified soft consequence, never a hard hazard", async () => {
     for (const rule of ["no_irreversible_damage", "no_outward_effect", "no_private_data_upload", "no_system_change"]) {
       for (const p of [0.4, 0.5, 0.599, 0.6, 0.99]) {
-        assert.equal((await judgeWithJev(flagged, context, deps({ intent_coverage: p, [rule]: 0.01 }))).kind, p >= 0.6 ? "allow" : "deny", `${rule}: ${p}`);
+        assert.equal((await judgeWithJev(flagged, context, deps({ intent_coverage: p, push_requested: 0.01, [rule]: 0.01 }))).kind, p >= 0.6 ? "allow" : "deny", `${rule}: ${p}`);
       }
     }
     for (const rule of ["no_secret_egress", "path_not_protected", "no_fetched_code_execution"]) {
@@ -42,11 +43,11 @@ describe("consequence-first release regressions (metadata only)", () => {
     const modelRegistry = registry({ classify: async (model, request) => {
       const value = request.state.value as Record<string, unknown>;
       assert.equal(value.referenced_assistant_proposal, "2. git push origin feature");
-      assert.equal(value.user_intent, "do #2? No, do not run anything; just explain");
+      assert.equal(value.latest_user_message, "do #2? No, do not run anything; just explain");
       assert.equal(JSON.stringify(request).includes("npm publish"), false);
-      return approvingResult(model, request, { intent_coverage: 0.1, no_outward_effect: 0.01 });
+      return approvingResult(model, request, { intent_coverage: 0.1, push_requested: 0.1, no_outward_effect: 0.01 });
     } });
-    assert.equal((await handleToolCall(bash(flagged.command!), { cwd, intent: tracker.value(), referencedProposal: tracker.referencedProposal(), modelRegistry }, { provider: "typesafe" }))?.block, true);
+    assert.equal((await handleToolCall(bash(flagged.command!), { cwd, intent: tracker.snapshot(), modelRegistry }, { provider: "typesafe" }))?.block, true);
   });
 
   it("incomplete or oversized intent never blocks alone or supplies an override", async () => {
@@ -62,8 +63,7 @@ describe("consequence-first release regressions (metadata only)", () => {
       const tracker = createIntentTracker();
       tracker.recordAssistant(assistant!);
       tracker.record(user!, "interactive");
-      assert.equal(tracker.referencedProposal(), "");
-      assert.equal(tracker.intentIncomplete(), true);
+      assert.deepEqual(tracker.snapshot(), { complete: false });
       for (const hazardous of [false, true]) {
         let dispatched = false;
         const modelRegistry = registry({ classify: async (model, request) => {
@@ -71,17 +71,18 @@ describe("consequence-first release regressions (metadata only)", () => {
           assert.equal(request.questions.intent_coverage, undefined);
           assert.equal(request.questions.local_scope, undefined);
           const value = request.state.value as Record<string, unknown>;
-          assert.equal(value.user_intent, "(incomplete user intent; not authorization)");
+          assert.equal(value.latest_user_message, "(incomplete user intent; not authorization)");
+          assert.equal(request.questions.push_requested, undefined);
           assert.equal(value.referenced_assistant_proposal, undefined);
           return approvingResult(model, request, { intent_coverage: 0.99, no_outward_effect: hazardous ? 0.01 : 0.99 });
         } });
-        const result = await handleToolCall(bash(flagged.command!), { cwd, intent: tracker.value(), intentIncomplete: true, modelRegistry }, { provider: "typesafe" });
+        const result = await handleToolCall(bash(flagged.command!), { cwd, intent: tracker.snapshot(), modelRegistry }, { provider: "typesafe" });
         assert.equal(result?.block, hazardous ? true : undefined);
         assert.equal(dispatched, true);
       }
     }
-    assert.equal((await judgeWithJev(flagged, { ...context, intent: "x".repeat(3001) }, deps({ no_outward_effect: 0.01 }))).kind, "deny");
-    assert.equal((await judgeWithJev(flagged, { ...context, intent: "x".repeat(3001) }, deps({}))).kind, "allow");
+    assert.equal((await judgeWithJev(flagged, { ...context, intent: said("x".repeat(3001)) }, deps({ no_outward_effect: 0.01 }))).kind, "deny");
+    assert.equal((await judgeWithJev(flagged, { ...context, intent: said("x".repeat(3001)) }, deps({}))).kind, "allow");
   });
 
   it("ordinary work bypasses discovery and even broken provider configuration", async () => {
@@ -93,7 +94,7 @@ describe("consequence-first release regressions (metadata only)", () => {
       "gh api -X GET repos/owner/repo", "gh api --method GET search/issues -f q=bug",
       "gh api --method HEAD repos/owner/repo", "curl --request HEAD https://example.test/docs",
     ]) {
-      assert.equal(await handleToolCall(bash(command), { cwd, intentIncomplete: true, modelRegistry }, { configFile: "/dev/null" }), undefined, command);
+      assert.equal(await handleToolCall(bash(command), { cwd, intent: { complete: false }, modelRegistry }, { configFile: "/dev/null" }), undefined, command);
     }
   });
 

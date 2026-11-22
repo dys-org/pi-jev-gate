@@ -61,7 +61,7 @@ it("runs frozen lifecycle inputs through native handlers and unchanged native re
     assert.equal(typeof payload.questions.no_outward_effect!.instructions, "object");
     assert.equal(payload.questions.local_scope, undefined);
     observed.push(context.state.value as Record<string, unknown>);
-    return approvingResult(model, context, { intent_coverage: 0.1, no_outward_effect: 0.01, unexpected_secret: 0.99 });
+    return approvingResult(model, context, { intent_coverage: 0.1, push_requested: 0.1, no_outward_effect: 0.01, unexpected_secret: 0.99 });
   } });
   await isolatedProvider(async () => {
     for (const item of focused.cases) {

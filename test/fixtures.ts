@@ -1,4 +1,4 @@
-import type { JevRegistry } from "../src/jev.ts";
+import type { Intent, JevRegistry } from "../src/jev.ts";
 
 type Model = Parameters<JevRegistry["classify"]>[0];
 type Context = Parameters<JevRegistry["classify"]>[1];
@@ -20,4 +20,8 @@ export function registry(overrides: Partial<JevRegistry> = {}): JevRegistry {
     classify: async (model, context) => approvingResult(model, context),
     ...overrides,
   };
+}
+
+export function said(latest: string, extra: { earlier?: readonly string[]; referencedProposal?: string } = {}): Intent {
+  return { complete: true, latest, earlier: extra.earlier ?? [], ...(extra.referencedProposal ? { referencedProposal: extra.referencedProposal } : {}) };
 }

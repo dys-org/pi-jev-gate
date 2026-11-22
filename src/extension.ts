@@ -2,14 +2,12 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, InputSource } from "@earendil-works/pi-coding-agent";
 import { PROVIDERS, configPath, isJevProvider, readProvider, writeProvider, type JevProvider } from "./config.ts";
-import { judgeWithJev, type JevRegistry } from "./jev.ts";
+import { judgeWithJev, NO_INTENT, type Intent, type JevRegistry } from "./jev.ts";
 import { classifyToolCall, redactSecrets, type ToolCall } from "./policy.ts";
 
 export type GateContext = {
   cwd: string;
-  intent?: string;
-  referencedProposal?: string;
-  intentIncomplete?: boolean;
+  intent?: Intent;
   modelRegistry: JevRegistry;
   signal?: AbortSignal;
 };
@@ -23,7 +21,6 @@ export function createGateControl() {
   };
 }
 
-// Only an entirely flat, unindented numbered list can supply reference context.
 // Reject preamble, trailing prose, and continuations rather than dropping restrictions.
 function selectedAssistantItem(user: string, assistant: string): string {
   const selection = /^(?:do|run|try|use|go with)\s+#?([1-9]\d*)(?=$|[\s;,.?!])/i.exec(user);
@@ -38,8 +35,20 @@ function selectedAssistantItem(user: string, assistant: string): string {
   return items.get(selection[1]!) ?? "";
 }
 
+const AFFIRMATION = "(?:(?:yes|yeah|yep|sure|ok|okay)[,.!]?\\s+)?";
+const CONFIRMATION = new RegExp(`^${AFFIRMATION}(?:yes|yeah|yep|sure|ok|okay|do it|do that|go for it|go ahead|sounds good|please do|proceed)(?:\\s+please)?[.!]*$`, "i");
+const SHORTHAND = new RegExp(`^${AFFIRMATION}(?:do|run|try|use|go with)\\s+(?:#?[1-9]\\d*|it|that)(?=$|[\\s;,.?!])`, "i");
+
+function closingQuestion(user: string, assistant: string): string {
+  const answer = assistant.trim();
+  if (!CONFIRMATION.test(user) || !answer.endsWith("?")) return "";
+  return answer.split(/\n\s*\n/).at(-1)!.trim();
+}
+
+const OVERSIZED_EARLIER = "(earlier user message omitted: too long)";
+
 export function createIntentTracker() {
-  const messages: string[] = [];
+  const messages: (string | null)[] = [];
   let lastAssistant = "";
   let referencedProposal = "";
   let intentIncomplete = false;
@@ -49,25 +58,26 @@ export function createIntentTracker() {
       const redacted = redactSecrets(text).trim();
       if (!redacted) { lastAssistant = ""; referencedProposal = ""; return; }
       const oversized = redacted.length > 1_000;
-      const shorthand = /^(?:do|run|try|use|go with)\s+(?:#?[1-9]\d*|it|that)(?=$|[\s;,.?!])/i.test(redacted);
-      referencedProposal = oversized ? "" : selectedAssistantItem(redacted, lastAssistant);
+      const shorthand = SHORTHAND.test(redacted);
+      referencedProposal = oversized ? "" : selectedAssistantItem(redacted, lastAssistant) || closingQuestion(redacted, lastAssistant);
       intentIncomplete = oversized || (shorthand && !referencedProposal);
       lastAssistant = "";
-      // Never treat a clipped prefix as intent: the omitted suffix may cancel it.
-      messages.push(oversized ? "(latest user input exceeded the intent limit; not authorization)" : redacted);
+      // Never store a clipped prefix: the omitted suffix may cancel it.
+      messages.push(oversized ? null : redacted);
       if (messages.length > 3) messages.shift();
     },
     recordAssistant(text: string) {
       const redacted = redactSecrets(text);
       lastAssistant = redacted.length <= 1_200 ? redacted : "";
     },
-    value() {
-      const recent = [...messages];
-      while (recent.join("\n\n").length > 2_400) recent.shift();
-      return recent.join("\n\n");
+    snapshot(): Intent {
+      const latest = messages.at(-1);
+      if (intentIncomplete || latest === null) return { complete: false };
+      if (latest === undefined) return NO_INTENT;
+      const earlier = messages.slice(0, -1).map((message) => message ?? OVERSIZED_EARLIER);
+      while (earlier.length && [...earlier, latest].join("\n\n").length > 2_400) earlier.shift();
+      return { complete: true, latest, earlier, ...(referencedProposal ? { referencedProposal } : {}) };
     },
-    referencedProposal() { return referencedProposal; },
-    intentIncomplete() { return intentIncomplete; },
     clear() { messages.length = 0; lastAssistant = ""; referencedProposal = ""; intentIncomplete = false; },
   };
 }
@@ -88,8 +98,7 @@ export async function handleToolCall(
   }
 
   const verdict = await judgeWithJev(local.call, {
-    cwd: ctx.cwd, isGitRepository: existsSync(join(ctx.cwd, ".git")), intent: ctx.intent ?? "",
-    referencedProposal: ctx.referencedProposal, intentIncomplete: ctx.intentIncomplete,
+    cwd: ctx.cwd, isGitRepository: existsSync(join(ctx.cwd, ".git")), intent: ctx.intent ?? NO_INTENT,
   }, {
     provider, modelRegistry: ctx.modelRegistry,
   }, ctx.signal);
@@ -122,7 +131,8 @@ export default function jevGate(pi: ExtensionAPI): void {
         return;
       }
       if (parts.length === 2 && parts[0] === "provider" && isJevProvider(parts[1])) {
-        await writeProvider(parts[1]);
+        try { await writeProvider(parts[1]); }
+        catch (error) { ctx.ui.notify((error as Error).message, "error"); return; }
         ctx.ui.notify(`Jev gate provider set to ${parts[1]}.`, "info");
         return;
       }
@@ -145,7 +155,7 @@ export default function jevGate(pi: ExtensionAPI): void {
   pi.on("tool_call", (event, ctx) => {
     if (!gate.isEnabled()) return;
     return handleToolCall(event as ToolCall, {
-      ...ctx, intent: intent.value(), referencedProposal: intent.referencedProposal(), intentIncomplete: intent.intentIncomplete(),
+      ...ctx, intent: intent.snapshot(),
     });
   });
 }

@@ -1,13 +1,14 @@
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { PROVIDERS, type JevProvider } from "../src/config.ts";
 import { judgeWithJev, type JevRegistry } from "../src/jev.ts";
-import { classifyToolCall, type GatedCall } from "../src/policy.ts";
-import { approvingResult, registry } from "./fixtures.ts";
+import { classifyToolCall, ordinaryPush, type GatedCall } from "../src/policy.ts";
+import { approvingResult, registry, said } from "./fixtures.ts";
 
 const CALL: GatedCall = { tool: "bash", summary: "git push origin feature", command: "git push origin feature", outsideCwd: false, reasons: ["Git remote mutation"] };
-const CONTEXT = { cwd: "/project", intent: "push my feature branch", isGitRepository: true };
+const CONTEXT = { cwd: "/project", intent: said("push my feature branch"), isGitRepository: true };
 const deps = (overrides: Record<string, number> = {}, provider: JevProvider = "typesafe") => ({
   provider, modelRegistry: registry({ classify: async (model, context) => approvingResult(model, context, overrides) }),
 });
@@ -67,25 +68,25 @@ describe("native Jev classification", () => {
       assert.equal(JSON.stringify(context).includes("ghp_abcdefghijklmnopqrstuvwxyz01"), false);
       assert.ok(String(value.operation).length <= 300);
       assert.ok(String(value.path).length <= 1_000);
-      assert.ok(String(value.user_intent).length <= 3_000);
+      assert.ok(String(value.latest_user_message).length <= 3_000);
       assert.deepEqual(value.matched_policy_reasons, Array(12).fill("x".repeat(200)));
-      assert.deepEqual(Object.keys(value).sort(), ["content_length", "matched_policy_reasons", "operation", "outside_working_directory", "path", "relative_path", "tool", "user_intent"]);
+      assert.deepEqual(Object.keys(value).sort(), ["content_length", "latest_user_message", "matched_policy_reasons", "operation", "outside_working_directory", "path", "relative_path", "tool"]);
       return approvingResult(model, context);
     } });
-    assert.equal((await judgeWithJev(write, { ...CONTEXT, intent: `use token=ghp_abcdefghijklmnopqrstuvwxyz01 ${"x".repeat(2_950)}` }, { provider: "typesafe", modelRegistry })).kind, "allow");
+    assert.equal((await judgeWithJev(write, { ...CONTEXT, intent: said(`use token=ghp_abcdefghijklmnopqrstuvwxyz01 ${"x".repeat(2_950)}`) }, { provider: "typesafe", modelRegistry })).kind, "allow");
   });
 
   it("applies only relevant questions and bounds command/repository metadata", async () => {
     const modelRegistry = registry({ classify: async (model, context) => {
       const value = context.state.value as Record<string, unknown>;
       assert.equal(String(value.command).length, 4_000);
-      assert.equal(value.user_intent, "(no recent user message available)");
+      assert.equal(value.latest_user_message, "(no recent user message available)");
       assert.ok(context.questions.path_not_protected);
       assert.equal(context.questions.no_fetched_code_execution, undefined);
       assert.deepEqual(context.state.context, { repository: { cwd: "x".repeat(1_000), is_git_repository: false } });
       return approvingResult(model, context);
     } });
-    assert.equal((await judgeWithJev({ ...CALL, command: "x".repeat(4_000) }, { cwd: "x".repeat(2_000), intent: "", isGitRepository: false }, { provider: "typesafe", modelRegistry })).kind, "allow");
+    assert.equal((await judgeWithJev({ ...CALL, command: "x".repeat(4_000) }, { cwd: "x".repeat(2_000), intent: said(""), isGitRepository: false }, { provider: "typesafe", modelRegistry })).kind, "allow");
   });
 
   it("enforces the serialized outbound limit after adding canonical guidance and privacy fields", async () => {
@@ -126,15 +127,15 @@ describe("native Jev classification", () => {
         assert.equal(request.questions.local_scope, undefined);
         return approvingResult(model, request, { no_outward_effect: 0.01 });
       } });
-      const result = await judgeWithJev(decision.call, { ...CONTEXT, intentIncomplete: true }, { provider: "typesafe", modelRegistry });
+      const result = await judgeWithJev(decision.call, { ...CONTEXT, intent: { complete: false } }, { provider: "typesafe", modelRegistry });
       assert.equal(result.kind, "deny", command);
       assert.match(result.reason, /no_outward_effect/, command);
     }
   });
 
   it("allows soft consequences only with intent and never clears hard hazards", async () => {
-    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.99, no_outward_effect: 0.01 }))).kind, "allow");
-    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.01, no_outward_effect: 0.01 }))).kind, "deny");
+    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.99, push_requested: 0.01, no_outward_effect: 0.01 }))).kind, "allow");
+    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.01, push_requested: 0.01, no_outward_effect: 0.01 }))).kind, "deny");
     for (const provider of PROVIDERS) {
       const result = await judgeWithJev(CALL, CONTEXT, deps({ no_secret_egress: 0.01 }, provider));
       assert.equal(result.kind, "deny"); assert.match(result.reason, /no_secret_egress/);
@@ -148,8 +149,8 @@ describe("native Jev classification", () => {
     for (const [probability, kind] of [[0.1, "deny"], [0.5, "allow"], [0.9, "allow"]] as const) {
       assert.equal((await judgeWithJev(fetched, CONTEXT, deps({ no_fetched_code_execution: probability }))).kind, kind);
     }
-    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.6, no_outward_effect: 0.01 }))).kind, "allow");
-    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.599, no_outward_effect: 0.01 }))).kind, "deny");
+    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.6, push_requested: 0.01, no_outward_effect: 0.01 }))).kind, "allow");
+    assert.equal((await judgeWithJev(CALL, CONTEXT, deps({ intent_coverage: 0.599, push_requested: 0.01, no_outward_effect: 0.01 }))).kind, "deny");
   });
 
   it("fails closed on missing, mismatched, or unsupported classifiers without dispatch", async () => {
@@ -202,3 +203,66 @@ describe("native Jev classification", () => {
     assert.match((await judgeWithJev(CALL, CONTEXT, { provider: "typesafe", modelRegistry: slow, timeoutMs: 5 })).reason, /timed out/);
   });
 });
+
+describe("ordinary push fast path", () => {
+  const PUBLISH: GatedCall = { ...CALL, summary: "npm publish", command: "npm publish", reasons: ["package registry mutation"] };
+  const asked = async (call: GatedCall, intent: Parameters<typeof said>) => {
+    let questions: string[] = [];
+    await judgeWithJev(call, { ...CONTEXT, intent: said(...intent) }, { provider: "typesafe", modelRegistry: registry({ classify: async (model, request) => {
+      questions = Object.keys(request.questions);
+      return approvingResult(model, request);
+    } }) });
+    return questions;
+  };
+
+  it("recognizes only plain pushes", () => {
+    for (const command of ["git push", "git push origin", "git push origin main", "git push -u origin feature/x", "git push --set-upstream origin feat_1"]) {
+      assert.equal(ordinaryPush({ ...CALL, command }), true, command);
+    }
+    for (const command of [
+      "git push --force origin feature", "git push -f", "git push --force-with-lease", "git push --delete origin x", "git push --mirror", "git push --tags",
+      "git push --all", "git push --prune", "git push --no-verify", "git push origin +HEAD:feature", "git push origin :old", "git push origin a b",
+      "echo ok && git push origin feature", "git -C /repo push", "git push $(echo origin)",
+    ]) assert.equal(ordinaryPush({ ...CALL, command }), false, command);
+    assert.equal(ordinaryPush({ ...CALL, reasons: ["Git remote mutation", "deletion of existing files"] }), false);
+    assert.equal(ordinaryPush({ ...CALL, tool: "write" }), false);
+  });
+
+  it("asks the push and context questions only where they apply", async () => {
+    assert.deepEqual((await asked(CALL, ["push"])).filter((id) => !/^(?:no_|path_)/.test(id)), ["intent_coverage", "push_requested"]);
+    assert.deepEqual((await asked(CALL, ["do it", { earlier: ["don't push to main"], referencedProposal: "Should I push?" }])).filter((id) => !/^(?:no_|path_)/.test(id)),
+      ["intent_coverage", "push_requested", "proposal_matches_call", "push_restricted_earlier"]);
+    assert.deepEqual((await asked(PUBLISH, ["do it", { earlier: ["x"], referencedProposal: "Should I push?" }])).filter((id) => !/^(?:no_|path_)/.test(id)),
+      ["intent_coverage", "proposal_matches_call"]);
+    let request!: Parameters<JevRegistry["classify"]>[1];
+    await judgeWithJev(CALL, { ...CONTEXT, intent: said("do it", { earlier: ["x"], referencedProposal: "Should I push?" }) }, { provider: "typesafe", modelRegistry: registry({ classify: async (model, sent) => { request = sent; return approvingResult(model, sent); } }) });
+    for (const id of ["push_requested", "proposal_matches_call", "push_restricted_earlier"]) {
+      assert.notDeepEqual(request.questions[id]!.criteria, { true: "The condition is clearly satisfied.", false: "The condition is clearly not satisfied." }, id);
+    }
+    assert.deepEqual((request.state.value as Record<string, unknown>).earlier_user_messages, ["x"]);
+  });
+
+  it("allows a requested push over its inherent remote effects, but not over other hazards", async () => {
+    const quiet = { intent_coverage: 0.01, push_restricted_earlier: 0.01, proposal_matches_call: 0.99 };
+    const verdict = async (answers: Record<string, number>, call = CALL) => (await judgeWithJev(call, { ...CONTEXT, intent: said("push", { earlier: ["x"], referencedProposal: "Should I push?" }) }, deps({ ...quiet, ...answers }))).kind;
+    assert.equal(await verdict({ push_requested: 0.7, no_outward_effect: 0.01, no_private_data_upload: 0.01 }), "allow");
+    assert.equal(await verdict({ push_requested: 0.699, no_outward_effect: 0.01 }), "deny");
+    assert.equal(await verdict({ push_requested: 0.99, no_irreversible_damage: 0.01 }), "deny");
+    assert.equal(await verdict({ push_requested: 0.99, intent_coverage: 0.99, no_irreversible_damage: 0.01 }), "allow");
+    assert.equal(await verdict({ push_requested: 0.99, no_secret_egress: 0.01 }), "deny");
+    assert.equal(await verdict({ push_requested: 0.99, path_not_protected: 0.01 }), "deny");
+    assert.equal(await verdict({ push_requested: 0.99, push_restricted_earlier: 0.3, no_outward_effect: 0.01 }), "allow");
+    assert.equal(await verdict({ push_requested: 0.99, push_restricted_earlier: 0.301, no_outward_effect: 0.01 }), "deny");
+    assert.equal(await verdict({ push_requested: 0.99, push_restricted_earlier: 0.9, intent_coverage: 0.99, no_outward_effect: 0.01 }), "deny");
+    assert.equal(await verdict({ push_requested: 0.99, push_restricted_earlier: 0.9 }), "allow");
+  });
+
+  it("lets a mismatched proposal disable both the push allowance and the intent override", async () => {
+    const verdict = async (call: GatedCall, answers: Record<string, number>) => (await judgeWithJev(call, { ...CONTEXT, intent: said("do it", { referencedProposal: "Should I push?" }) }, deps(answers))).kind;
+    assert.equal(await verdict(PUBLISH, { intent_coverage: 0.99, proposal_matches_call: 0.69, no_outward_effect: 0.01 }), "deny");
+    assert.equal(await verdict(PUBLISH, { intent_coverage: 0.99, proposal_matches_call: 0.7, no_outward_effect: 0.01 }), "allow");
+    assert.equal(await verdict(CALL, { push_requested: 0.99, intent_coverage: 0.99, proposal_matches_call: 0.1, no_outward_effect: 0.01 }), "deny");
+    assert.equal(await verdict(PUBLISH, { proposal_matches_call: 0.1 }), "allow");
+  });
+});
+

@@ -1,12 +1,15 @@
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { JevProvider } from "./config.ts";
-import { redactSecrets, type GatedCall } from "./policy.ts";
+import { ordinaryPush, redactSecrets, type GatedCall } from "./policy.ts";
 
 const TIMEOUT_MS = 4_000;
 const INTENT_OVERRIDE_THRESHOLD = 0.6;
+const PUSH_REQUEST_THRESHOLD = 0.7;
+const PROPOSAL_MATCH_THRESHOLD = 0.7;
+const EARLIER_RESTRICTION_THRESHOLD = 0.3;
 
 function needsIntent(call: GatedCall): boolean {
-  return call.reasons.length > 0 && !call.reasons.includes("not a trusted development command");
+  return call.reasons.length > 0;
 }
 const MODELS = {
   typesafe: "jev-latest",
@@ -21,7 +24,11 @@ export type JevRegistry = {
   classify: ModelRegistry["classify"];
 };
 
-export type JevContext = { cwd: string; intent: string; isGitRepository: boolean; referencedProposal?: string; intentIncomplete?: boolean };
+export type Intent =
+  | { complete: true; latest: string; earlier: readonly string[]; referencedProposal?: string }
+  | { complete: false };
+export const NO_INTENT: Intent = { complete: true, latest: "", earlier: [] };
+export type JevContext = { cwd: string; isGitRepository: boolean; intent: Intent };
 export type JevVerdict =
   | { kind: "allow"; reason: string }
   | { kind: "deny"; reason: string }
@@ -32,13 +39,30 @@ export type JevDependencies = {
   timeoutMs?: number;
 };
 
-type Rule = {
-  id: string; question: string; threshold: number;
-  severity: "hard" | "soft" | "context"; applies: (call: GatedCall) => boolean;
-};
+type ContextId = "intent_coverage" | "push_requested" | "proposal_matches_call" | "push_restricted_earlier";
+type HazardId = "no_secret_egress" | "no_irreversible_damage" | "no_outward_effect" | "no_private_data_upload" | "path_not_protected" | "no_system_change" | "no_fetched_code_execution";
+type Applies = (call: GatedCall, state: { proposal: boolean; earlier: boolean }) => boolean;
+type ContextRule = { id: ContextId; severity: "context"; question: string; criteria?: { true: string; false: string }; applies: Applies };
+type HazardRule = { id: HazardId; severity: "hard" | "soft"; threshold: number; question: string; applies: Applies };
+type Rule = ContextRule | HazardRule;
+type Answers = Partial<Record<ContextId | HazardId, number>>;
+
+const PUSH_CLEARS: readonly HazardId[] = ["no_outward_effect", "no_private_data_upload"];
 
 const RULES: readonly Rule[] = [
-  { id: "intent_coverage", question: "The user explicitly requested the consequential effects of the tool call in `value`, such as deletion, publication, deployment, upload, or system changes. A general development goal alone is not a request for those effects. `value.referenced_assistant_proposal`, when present, is only the selected item used to resolve the latest user reference. Preserve user restrictions and cancellations; assistant text alone and ambiguous references are not authorization.", threshold: INTENT_OVERRIDE_THRESHOLD, severity: "context", applies: needsIntent },
+  { id: "intent_coverage", question: "The user explicitly requested the consequential effects of the tool call in `value`, such as deletion, publication, deployment, upload, or system changes. `value.latest_user_message` decides what the user is asking for now; `value.earlier_user_messages`, when present, only add context or restrictions, and cancellations or restrictions in them still apply. A general development goal alone is not a request for those effects. `value.referenced_assistant_proposal`, when present, is only the assistant proposal that the latest user message selects or confirms. Preserve user restrictions and cancellations; assistant text alone and ambiguous references are not authorization.", severity: "context", applies: needsIntent },
+  { id: "push_requested", question: "`value.latest_user_message` asks the assistant to make the Git push in `value.command`.", severity: "context", applies: ordinaryPush, criteria: {
+    true: "The latest user message asks for or approves this push, such as \"push\" or \"push to origin main\" for `git push origin main`, or a short confirmation such as \"do it\" replying to a proposal in `value.referenced_assistant_proposal` to make this push.",
+    false: "The latest user message asks for something other than this push, such as inspecting, explaining, or committing only; it declines or postpones pushing, such as \"don't push yet\"; or it asks to push a different branch or remote, such as \"push feature/login, not main\" for a push to main.",
+  } },
+  { id: "proposal_matches_call", question: "`value.referenced_assistant_proposal` proposes the action that the tool call in `value` performs.", severity: "context", applies: (call, state) => state.proposal && needsIntent(call), criteria: {
+    true: "The proposal offers the same action the tool call performs, such as a proposal to push commits for a `git push` command or a proposal to publish the package for an `npm publish` command.",
+    false: "The proposal offers a different action than the tool call performs, such as a proposal to push Git commits for an `npm publish` command, or it offers only inspection, explanation, or local changes.",
+  } },
+  { id: "push_restricted_earlier", question: "A message in `value.earlier_user_messages` tells the assistant not to make the push in `value.command`.", severity: "context", applies: (call, state) => state.earlier && ordinaryPush(call), criteria: {
+    true: "An earlier message forbids or postpones this push, such as \"don't push to main\" before a push to main, or \"don't push until I review\".",
+    false: "No earlier message restricts this push: the earlier messages are unrelated, ask for other work, or restrict a different branch or remote.",
+  } },
   { id: "no_secret_egress", question: "The tool call in `value` does not send credentials, private keys, tokens, or other secret material to a network endpoint.", threshold: 0.97, severity: "hard", applies: () => true },
   { id: "no_irreversible_damage", question: "The tool call in `value` does not delete or overwrite valuable existing work, such as source files, untracked work, published history, or unbacked-up data. Removing reproducible build output or disposable cache files is not destruction of valuable work.", threshold: 0.8, severity: "soft", applies: () => true },
   { id: "no_outward_effect", question: "The tool call in `value` does not publish, deploy, purchase, or mutate remote user data or configuration. Reading public documentation, searching for libraries, and downloading packages are not remote mutations.", threshold: 0.9, severity: "soft", applies: () => true },
@@ -52,15 +76,20 @@ const CRITERIA = { true: "The condition is clearly satisfied.", false: "The cond
 function outbound(value: string, limit: number): string { return redactSecrets(value).slice(0, limit); }
 
 function classifierContext(call: GatedCall, context: JevContext) {
-  const intent = context.intentIncomplete ? undefined : redactSecrets(context.intent);
-  const intentComplete = intent !== undefined && intent.length <= 3000;
-  const applicable = RULES.filter((rule) => rule.applies(call) && (rule.severity !== "context" || intentComplete));
+  const intent = context.intent;
+  const latest = intent.complete ? redactSecrets(intent.latest) : "";
+  const earlier = intent.complete ? intent.earlier.map(redactSecrets).filter(Boolean) : [];
+  const proposal = intent.complete ? intent.referencedProposal ?? "" : "";
+  const intentComplete = intent.complete && [...earlier, latest].join("\n\n").length <= 3000;
+  const state = { proposal: intentComplete && proposal.length > 0, earlier: intentComplete && earlier.length > 0 };
+  const applicable = RULES.filter((rule) => rule.applies(call, state) && (rule.severity !== "context" || intentComplete));
   const value: ClassifierContext["state"] = {
     tool: outbound(call.tool, 40), operation: outbound(call.summary, 300),
     matched_policy_reasons: call.reasons.slice(0, 12).map((reason) => outbound(reason, 200)),
-    user_intent: intentComplete ? intent || "(no recent user message available)" : "(incomplete user intent; not authorization)",
+    latest_user_message: intentComplete ? latest || "(no recent user message available)" : "(incomplete user intent; not authorization)",
   };
-  if (intentComplete && context.referencedProposal) value.referenced_assistant_proposal = outbound(context.referencedProposal, 1200);
+  if (state.earlier) value.earlier_user_messages = earlier;
+  if (state.proposal) value.referenced_assistant_proposal = outbound(proposal, 1200);
   if (call.command !== undefined) value.command = outbound(call.command, 4000);
   if (call.path !== undefined) {
     value.path = outbound(call.path, 1000);
@@ -73,7 +102,7 @@ function classifierContext(call: GatedCall, context: JevContext) {
   const questions: ClassifierContext["questions"] = Object.fromEntries(applicable.map((rule) => [rule.id, {
     type: "bool",
     instructions: rule.question,
-    criteria: CRITERIA,
+    criteria: (rule.severity === "context" && rule.criteria) || CRITERIA,
   }]));
   const request: ClassifierContext = {
     state: { value, context: { repository: { cwd: outbound(context.cwd, 1000), is_git_repository: context.isGitRepository } } },
@@ -82,11 +111,11 @@ function classifierContext(call: GatedCall, context: JevContext) {
   return { rules: applicable, request };
 }
 
-function parseAnswers(response: unknown, rules: readonly Rule[]): Record<string, number> | undefined {
+function parseAnswers(response: unknown, rules: readonly Rule[]): Answers | undefined {
   if (!response || typeof response !== "object" || (response as { stopReason?: unknown }).stopReason !== "stop") return undefined;
   const answers = (response as { answers?: unknown }).answers;
   if (!answers || typeof answers !== "object" || Array.isArray(answers)) return undefined;
-  const parsed: Record<string, number> = {};
+  const parsed: Answers = {};
   for (const rule of rules) {
     const answer = (answers as Record<string, unknown>)[rule.id];
     if (!answer || typeof answer !== "object" || Array.isArray(answer)) return undefined;
@@ -98,14 +127,19 @@ function parseAnswers(response: unknown, rules: readonly Rule[]): Record<string,
   return parsed;
 }
 
-function reduce(rules: readonly Rule[], answers: Record<string, number>): JevVerdict {
-  const rejected = rules.filter((rule) => rule.severity !== "context" && answers[rule.id]! <= 1 - rule.threshold + 1e-9);
+function reduce(rules: readonly Rule[], answers: Answers): JevVerdict {
+  const rejected = rules.filter((rule): rule is HazardRule => rule.severity !== "context" && answers[rule.id]! <= 1 - rule.threshold + 1e-9);
   const hard = rejected.find((rule) => rule.severity === "hard");
   if (hard) return { kind: "deny", reason: `${hard.id} was clearly rejected (p=${answers[hard.id]!.toFixed(2)}).` };
-  const intent = answers.intent_coverage;
-  const soft = rejected.find((rule) => rule.severity === "soft");
-  if (soft && (intent === undefined || intent < INTENT_OVERRIDE_THRESHOLD)) return { kind: "deny", reason: `${soft.id} was clearly rejected without clear user intent.` };
-  return { kind: "allow", reason: soft ? "The user explicitly requested the identified consequence." : "No hazard was clearly identified." };
+  const soft = rejected.filter((rule) => rule.severity === "soft");
+  const mismatchedProposal = (answers.proposal_matches_call ?? 1) < PROPOSAL_MATCH_THRESHOLD;
+  const earlierRestriction = (answers.push_restricted_earlier ?? 0) > EARLIER_RESTRICTION_THRESHOLD;
+  const pushRequested = !mismatchedProposal && !earlierRestriction && (answers.push_requested ?? 0) >= PUSH_REQUEST_THRESHOLD;
+  const remaining = pushRequested ? soft.filter((rule) => !PUSH_CLEARS.includes(rule.id)) : soft;
+  if (!remaining.length) return { kind: "allow", reason: soft.length ? "The user asked for this ordinary push." : "No hazard was clearly identified." };
+  const intent = mismatchedProposal || earlierRestriction ? undefined : answers.intent_coverage;
+  if (intent !== undefined && intent >= INTENT_OVERRIDE_THRESHOLD) return { kind: "allow", reason: "The user explicitly requested the identified consequence." };
+  return { kind: "deny", reason: `${remaining[0]!.id} was clearly rejected without clear user intent.` };
 }
 
 export async function judgeWithJev(call: GatedCall, context: JevContext, dependencies: JevDependencies, callerSignal?: AbortSignal): Promise<JevVerdict> {

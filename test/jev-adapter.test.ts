@@ -36,7 +36,7 @@ it("preserves canonical guidance and provider privacy fields through the install
     const result = await judgeWithJev({
       tool: "bash", summary: "git push origin feature", command: "git push origin feature",
       outsideCwd: false, reasons: ["Git remote mutation"],
-    }, { cwd: "/project", intent: "do 2; only my feature branch", isGitRepository: true, referencedProposal: "2. git push origin feature" }, { provider, modelRegistry });
+    }, { cwd: "/project", intent: { complete: true, latest: "do 2; only my feature branch", earlier: [], referencedProposal: "2. git push origin feature" }, isGitRepository: true }, { provider, modelRegistry });
 
     assert.equal(result.kind, "allow");
     assert.equal(requests.length, 1);
@@ -56,8 +56,8 @@ it("preserves canonical guidance and provider privacy fields through the install
     assert.deepEqual(requests[0], { model: selectedModelId, state: nativeContext.state, questions, ...privacy });
     const harmless = await judgeWithJev({
       tool: "bash", summary: "echo harmless", command: "echo harmless", outsideCwd: false,
-      reasons: ["not a trusted development command"],
-    }, { cwd: "/project", intent: "Inspect only", isGitRepository: true }, { provider, modelRegistry });
+      reasons: [],
+    }, { cwd: "/project", intent: { complete: true, latest: "Inspect only", earlier: [] }, isGitRepository: true }, { provider, modelRegistry });
     assert.equal(harmless.kind, "allow");
     assert.equal(requests.length, 2);
     assert.equal(nativeContext.questions.intent_coverage, undefined);
